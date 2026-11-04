@@ -1,0 +1,17 @@
+# Render Blueprint for the single-file bot (repo root = this folder).
+services:
+  - type: web
+    name: lalitha-order-bot
+    env: python
+    plan: free
+    buildCommand: "true"
+    startCommand: "python3 bot_server.py"
+    envVars:
+      - key: MENU_CSV
+        value: lalitha
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: PHONE_NUMBER_ID
+        sync: false
+      - key: WEBHOOK_VERIFY_TOKEN
+        sync: false
