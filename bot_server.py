@@ -191,12 +191,14 @@ class Bot:
             extra += f" {pickup[0].upper() + pickup[1:]}."
         if existing:
             existing.update({"items": items, "notes": notes, "pickup": pickup,
-                             "total_cents": total, "name": name})
+                             "total_cents": total, "name": name,
+                             "ts": time.time()})
             return (f'✅ Order updated #{existing["id"]} — ${total/100:.2f} total.{extra} '
                     f'Reply CANCEL anytime to cancel it.')
         order = {"id": self._next_id, "phone": phone, "name": name,
                  "items": items, "notes": notes, "pickup": pickup,
-                 "total_cents": total, "status": "placed"}
+                 "total_cents": total, "status": "placed",
+                 "ts": time.time()}
         self._next_id += 1
         self.orders.append(order)
         s = self.store.get(phone) or {}
@@ -394,6 +396,15 @@ def extract_events(payload):
             for echo in val.get("message_echoes", []) or val.get("smb_message_echoes", []):
                 yield ("echo", tenant_id, echo.get("to", ""), "", "", "")
 
+def _fmt_ts(ts):
+    """Order timestamp -> 'Wed Nov 4, 8:05 AM' (Pacific)."""
+    if not ts:
+        return "—"
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(
+        ts, ZoneInfo("America/Los_Angeles")).strftime("%a %b %-d, %-I:%M %p")
+
 def render_dashboard():
     import html as H
     bots = [("Order Bot", BOT)] + [(tid, b) for tid, b in _BOTS.items()]
@@ -410,22 +421,41 @@ def render_dashboard():
         revenue = sum(o["total_cents"] for o in orders) / 100
         day_of = {i["name"]: i.get("day", "") for i in bot.menu}
         cook, pack = {}, {}
+        people, cont, cust = {}, {}, {}
         for o in orders:
+            c = cust.setdefault(o["phone"], {"name": o.get("name") or "",
+                                             "n": 0, "cents": 0})
+            c["n"] += 1
+            c["cents"] += o["total_cents"]
+            if o.get("name"):
+                c["name"] = o["name"]
             for i in o["items"]:
                 d = i.get("day") or day_of.get(i["name"], "")
                 key = (d, i["name"])
                 cook[key] = cook.get(key, 0) + i["qty"] * i.get("size_oz", 16)
+                cont[key] = cont.get(key, 0) + i["qty"]
+                people.setdefault(key, set()).add(o["phone"])
                 pack[i.get("size_oz", 16)] = pack.get(i.get("size_oz", 16), 0) + i["qty"]
         out.append(f"<h2>{H.escape(label)}</h2>")
-        out.append(f"<p><b>{len(orders)} orders \u00b7 ${revenue:.2f}</b> "
+        out.append(f"<p><b>{len(orders)} orders · ${revenue:.2f}</b> "
                    f"<span class=muted>packing: "
                    + ", ".join(f"{n}x {s} oz" for s, n in sorted(pack.items()))
                    + "</span></p>")
+        DAYORD = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+                  "Friday": 4, "Saturday": 5, "Sunday": 6}
         if cook:
-            out.append("<p class=muted>To cook: " + " \u00b7 ".join(
-                f"{H.escape(d + ' ' if d else '')}{H.escape(n)}: {oz} oz"
-                for (d, n), oz in sorted(cook.items())) + "</p>")
-        out.append("<table><tr><th>#</th><th>Customer</th><th>Items</th><th>Total</th></tr>")
+            out.append("<h3>Cook sheet — what to make</h3>")
+            out.append("<table><tr><th>Day</th><th>Item</th><th>People</th>"
+                       "<th>Containers</th><th>Total to cook</th></tr>")
+            for (d, n), oz in sorted(
+                    cook.items(),
+                    key=lambda kv: (DAYORD.get(kv[0][0], 9), kv[0][1])):
+                out.append(f"<tr><td>{H.escape(d)}</td><td>{H.escape(n)}</td>"
+                           f"<td>{len(people[(d, n)])}</td>"
+                           f"<td>{cont[(d, n)]}</td><td>{oz} oz</td></tr>")
+            out.append("</table>")
+        out.append("<h3>Orders</h3>")
+        out.append("<table><tr><th>#</th><th>Customer</th><th>Placed</th><th>Items</th><th>Total</th></tr>")
         for o in sorted(orders, key=lambda x: -x["id"]):
             items = "<br>".join(
                 f'{i["qty"]}x {H.escape(i["name"])} ({i.get("size_oz", 16)} oz)'
@@ -436,8 +466,17 @@ def render_dashboard():
                 items += f'<br><span class=muted>Note: {H.escape(o["notes"])}</span>'
             out.append(f"<tr><td>#{o['id']}</td>"
                        f"<td>{H.escape(o.get('name') or '')}<br><span class=muted>{H.escape(o['phone'])}</span></td>"
+                       f"<td>{_fmt_ts(o.get('ts'))}</td>"
                        f"<td>{items}</td><td>${o['total_cents']/100:.2f}</td></tr>")
         out.append("</table>")
+        if cust:
+            out.append("<h3>By customer — totals for monthly billing</h3>")
+            out.append("<table><tr><th>Customer</th><th>Orders</th><th>Total</th></tr>")
+            for ph, c in sorted(cust.items(), key=lambda kv: -kv[1]["cents"]):
+                out.append(f"<tr><td>{H.escape(c['name'])}<br>"
+                           f"<span class=muted>{H.escape(ph)}</span></td>"
+                           f"<td>{c['n']}</td><td>${c['cents']/100:.2f}</td></tr>")
+            out.append("</table>")
     return "".join(out)
 
 def _deliver(phone, reply, msg_id, tid, tok):
