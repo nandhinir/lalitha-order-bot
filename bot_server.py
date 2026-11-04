@@ -442,7 +442,7 @@ def render_dashboard():
 
 def _deliver(phone, reply, msg_id, tid, tok):
     try:
-        if msg_id and reply.startswith("\u2705"):
+        if msg_id and reply.startswith(("\u2705", "\U0001F44D")):
             try:
                 send_reaction(phone, msg_id, "\U0001F44D",
                               token=tok, phone_number_id=tid)
