@@ -394,6 +394,52 @@ def extract_events(payload):
             for echo in val.get("message_echoes", []) or val.get("smb_message_echoes", []):
                 yield ("echo", tenant_id, echo.get("to", ""), "", "", "")
 
+def render_dashboard():
+    import html as H
+    bots = [("Order Bot", BOT)] + [(tid, b) for tid, b in _BOTS.items()]
+    out = ["<!doctype html><meta charset=utf-8><meta name=viewport "
+           "content='width=device-width,initial-scale=1'>"
+           "<meta http-equiv=refresh content=15>"
+           "<title>Orders Dashboard</title><style>"
+           "body{font-family:system-ui;margin:16px;color:#111}"
+           "table{border-collapse:collapse;width:100%;font-size:14px}"
+           "td,th{border-bottom:1px solid #ddd;padding:4px 6px;text-align:left;vertical-align:top}"
+           ".muted{color:#666;font-size:13px}</style>"]
+    for label, bot in bots:
+        orders = [o for o in bot.orders if o.get("status") == "placed"]
+        revenue = sum(o["total_cents"] for o in orders) / 100
+        day_of = {i["name"]: i.get("day", "") for i in bot.menu}
+        cook, pack = {}, {}
+        for o in orders:
+            for i in o["items"]:
+                d = i.get("day") or day_of.get(i["name"], "")
+                key = (d, i["name"])
+                cook[key] = cook.get(key, 0) + i["qty"] * i.get("size_oz", 16)
+                pack[i.get("size_oz", 16)] = pack.get(i.get("size_oz", 16), 0) + i["qty"]
+        out.append(f"<h2>{H.escape(label)}</h2>")
+        out.append(f"<p><b>{len(orders)} orders \u00b7 ${revenue:.2f}</b> "
+                   f"<span class=muted>packing: "
+                   + ", ".join(f"{n}x {s} oz" for s, n in sorted(pack.items()))
+                   + "</span></p>")
+        if cook:
+            out.append("<p class=muted>To cook: " + " \u00b7 ".join(
+                f"{H.escape(d + ' ' if d else '')}{H.escape(n)}: {oz} oz"
+                for (d, n), oz in sorted(cook.items())) + "</p>")
+        out.append("<table><tr><th>#</th><th>Customer</th><th>Items</th><th>Total</th></tr>")
+        for o in sorted(orders, key=lambda x: -x["id"]):
+            items = "<br>".join(
+                f'{i["qty"]}x {H.escape(i["name"])} ({i.get("size_oz", 16)} oz)'
+                + (f' <span class=muted>[{H.escape(i.get("day") or day_of.get(i["name"], ""))}]</span>'
+                   if (i.get("day") or day_of.get(i["name"])) else "")
+                for i in o["items"])
+            if o.get("notes"):
+                items += f'<br><span class=muted>Note: {H.escape(o["notes"])}</span>'
+            out.append(f"<tr><td>#{o['id']}</td>"
+                       f"<td>{H.escape(o.get('name') or '')}<br><span class=muted>{H.escape(o['phone'])}</span></td>"
+                       f"<td>{items}</td><td>${o['total_cents']/100:.2f}</td></tr>")
+        out.append("</table>")
+    return "".join(out)
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/webhook":
@@ -420,7 +466,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
-        q = parse_qs(urlparse(self.path).query)
+        u = urlparse(self.path)
+        q = parse_qs(u.query)
+        if u.path == "/dashboard":
+            key = os.environ.get("DASHBOARD_KEY") or os.environ.get("WEBHOOK_VERIFY_TOKEN", "")
+            if key and q.get("k", [""])[0] == key:
+                body = render_dashboard().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers(); self.wfile.write(body)
+                return
+            self.send_response(403); self.end_headers(); return
         if q.get("hub.mode", [""])[0] == "subscribe":
             expected = os.environ.get("WEBHOOK_VERIFY_TOKEN", "")
             if expected and q.get("hub.verify_token", [""])[0] == expected:
