@@ -306,7 +306,7 @@ def send_text(to_phone, body, token=None, phone_number_id=None):
         data=json.dumps(payload).encode(), method="POST",
         headers={"Authorization": f"Bearer {token}",
                  "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read().decode())
 
 def send_reaction(to_phone, message_id, emoji="👍", token=None, phone_number_id=None):
@@ -327,12 +327,12 @@ def send_reaction(to_phone, message_id, emoji="👍", token=None, phone_number_i
         data=json.dumps(payload).encode(), method="POST",
         headers={"Authorization": f"Bearer {token}",
                  "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read().decode())
 
 # ---------------------------------------------------------------- server
-import csv, io
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import csv, io, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EMBEDDED_MENUS = {"lalitha": LALITHA_CSV, "friend2": FRIEND2_CSV}
 
@@ -440,6 +440,19 @@ def render_dashboard():
         out.append("</table>")
     return "".join(out)
 
+def _deliver(phone, reply, msg_id, tid, tok):
+    try:
+        if msg_id and reply.startswith("\u2705"):
+            try:
+                send_reaction(phone, msg_id, "\U0001F44D",
+                              token=tok, phone_number_id=tid)
+            except Exception as e:
+                print(f"[send] reaction failed: {e}", flush=True)
+        send_text(phone, reply, token=tok, phone_number_id=tid)
+        print(f"[send] reply sent to {phone}", flush=True)
+    except Exception as e:
+        print(f"[send] text failed: {e}", flush=True)
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path != "/webhook":
@@ -449,21 +462,23 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(body or b"{}")
         except Exception:
             payload = {}
+        jobs = []
         for kind, tenant_id, phone, text, name, msg_id in extract_events(payload):
             bot, tid, tok = get_bot(tenant_id)
             if kind == "echo" and phone:
                 bot.handle_owner_echo(phone)
             elif kind == "message":
+                print(f"[webhook] from={phone} text={text!r}", flush=True)
                 reply = bot.handle_message(phone, text, name)
                 if reply:
-                    if msg_id and reply.startswith("\u2705"):
-                        try:
-                            send_reaction(phone, msg_id, "\U0001F44D",
-                                          token=tok, phone_number_id=tid)
-                        except Exception:
-                            pass
-                    send_text(phone, reply, token=tok, phone_number_id=tid)
+                    jobs.append((phone, reply, msg_id, tid, tok))
+        # Fast 200 first; sends happen in the background so a slow
+        # Graph call can never block or time out the webhook.
         self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        for phone, reply, msg_id, tid, tok in jobs:
+            threading.Thread(target=_deliver,
+                             args=(phone, reply, msg_id, tid, tok),
+                             daemon=True).start()
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
         u = urlparse(self.path)
@@ -491,4 +506,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

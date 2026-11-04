@@ -7,6 +7,8 @@ services:
     buildCommand: "true"
     startCommand: "python3 bot_server.py"
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: MENU_CSV
         value: lalitha
       - key: WHATSAPP_TOKEN
